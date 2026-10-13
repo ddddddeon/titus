@@ -103,17 +103,25 @@ func (d *CrossRuleDeduplicator) clusterBySharedValues(matches []*types.Match) []
 	// A generic rule often captures only a substring of a secret that a
 	// provider-specific rule matched in full (for example an Anthropic key
 	// captured as a truncated generic API key). Exact value sharing misses
-	// these, so also merge a generic match with a specific match when one's
-	// captured value is contained in the other's. pickWinner then drops the
-	// generic in favour of the specific. Restricting this to generic/specific
-	// pairs leaves specific/specific clustering unchanged.
-	for i := 0; i < n; i++ {
-		for j := i + 1; j < n; j++ {
-			if d.isGeneric(matches[i]) == d.isGeneric(matches[j]) {
-				continue
-			}
-			if containsGroupValue(matches[i], matches[j]) {
-				union(i, j)
+	// these, so also merge a generic match with a specific match when their
+	// byte spans overlap and one's captured value is contained in the other's.
+	// Requiring overlapping spans keeps unrelated findings at disjoint offsets
+	// separate, and iterating only generic/specific pairs both bounds the work
+	// and leaves specific/specific clustering unchanged. pickWinner then drops
+	// the generic in favour of the specific.
+	var generic, specific []int
+	for i, m := range matches {
+		if d.isGeneric(m) {
+			generic = append(generic, i)
+		} else {
+			specific = append(specific, i)
+		}
+	}
+	for _, gi := range generic {
+		for _, si := range specific {
+			if spansOverlap(matches[gi], matches[si]) &&
+				containsGroupValue(matches[gi], matches[si]) {
+				union(gi, si)
 			}
 		}
 	}
@@ -201,6 +209,12 @@ func (d *CrossRuleDeduplicator) isGeneric(m *types.Match) bool {
 		return ruleHasCategory(r, "generic")
 	}
 	return false
+}
+
+// spansOverlap reports whether the two matches cover overlapping byte ranges.
+func spansOverlap(a, b *types.Match) bool {
+	return a.Location.Offset.Start < b.Location.Offset.End &&
+		b.Location.Offset.Start < a.Location.Offset.End
 }
 
 // containsGroupValue reports whether any non-empty captured group value of one

@@ -19,6 +19,12 @@ func makeMatch(ruleID string, groups ...string) *types.Match {
 	}
 }
 
+func matchAt(ruleID string, start, end int64, groups ...string) *types.Match {
+	m := makeMatch(ruleID, groups...)
+	m.Location.Offset = types.OffsetSpan{Start: start, End: end}
+	return m
+}
+
 func makeRules(rules ...struct{ id, pattern string }) map[string]*types.Rule {
 	m := make(map[string]*types.Rule)
 	for _, r := range rules {
@@ -446,14 +452,37 @@ func TestCrossRule_GenericSubstringOfSpecific(t *testing.T) {
 	dedup := NewCrossRuleDeduplicator(rules, nil)
 
 	matches := []*types.Match{
-		makeMatch("np.anthropic.1", "sk-ant-api03-key-asdf-AA"),
-		makeMatch("np.generic.2", "ant-api03-key-asdf"),
+		matchAt("np.anthropic.1", 0, 24, "sk-ant-api03-key-asdf-AA"),
+		matchAt("np.generic.2", 3, 21, "ant-api03-key-asdf"),
 	}
 
 	result := dedup.Deduplicate(matches)
 
 	require.Len(t, result, 1)
 	assert.Equal(t, "np.anthropic.1", result[0].RuleID)
+}
+
+func TestCrossRule_GenericDisjointOffsetNotMerged(t *testing.T) {
+	// A generic match whose value is a substring of a specific match but at a
+	// disjoint offset is an unrelated finding and must not be merged.
+	rules := map[string]*types.Rule{
+		"np.anthropic.1": {ID: "np.anthropic.1", Pattern: `sk-ant-[A-Za-z0-9_-]+`},
+		"np.generic.2": {
+			ID:         "np.generic.2",
+			Pattern:    `[A-Za-z0-9_-]+`,
+			Categories: []string{"generic"},
+		},
+	}
+	dedup := NewCrossRuleDeduplicator(rules, nil)
+
+	matches := []*types.Match{
+		matchAt("np.anthropic.1", 0, 21, "sk-ant-api03-key-asdf"),
+		matchAt("np.generic.2", 100, 118, "ant-api03-key-asdf"),
+	}
+
+	result := dedup.Deduplicate(matches)
+
+	require.Len(t, result, 2)
 }
 
 func TestCrossRule_SpecificSubstringNotMerged(t *testing.T) {
