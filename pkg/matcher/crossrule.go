@@ -38,7 +38,9 @@ func (d *CrossRuleDeduplicator) SetCanValidate(fn func(ruleID string) bool) {
 
 // Deduplicate takes all matches from a single blob and returns only the
 // non-redundant subset. Matches are clustered by shared captured group values,
-// then for each cluster the most informative match is kept.
+// then for each cluster the most informative match is kept. Finally a generic
+// catch-all match is dropped when a provider-specific match overlaps it and
+// contains its captured value.
 func (d *CrossRuleDeduplicator) Deduplicate(matches []*types.Match) []*types.Match {
 	if len(matches) <= 1 {
 		return matches
@@ -55,7 +57,47 @@ func (d *CrossRuleDeduplicator) Deduplicate(matches []*types.Match) []*types.Mat
 		winner := d.pickWinner(cluster)
 		result = append(result, winner)
 	}
-	return result
+	return d.dropRedundantGenerics(result)
+}
+
+// dropRedundantGenerics removes a generic match when a provider-specific match
+// overlaps it and fully contains its captured value. A generic catch-all rule
+// frequently captures only a substring of a secret that a specific rule already
+// reports in full (for example an Anthropic key seen as a truncated generic API
+// key). Exact-value clustering does not catch this because the captured values
+// differ. Filtering the generic out, rather than clustering it, means two
+// independent provider-specific findings are never merged or discarded, even
+// when a single short generic value is a substring of both.
+func (d *CrossRuleDeduplicator) dropRedundantGenerics(matches []*types.Match) []*types.Match {
+	specific := make([]*types.Match, 0, len(matches))
+	for _, m := range matches {
+		if !d.isGeneric(m) {
+			specific = append(specific, m)
+		}
+	}
+	if len(specific) == 0 {
+		return matches
+	}
+
+	kept := make([]*types.Match, 0, len(matches))
+	for _, m := range matches {
+		if d.isGeneric(m) && shadowedBySpecific(m, specific) {
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept
+}
+
+// shadowedBySpecific reports whether a specific match overlaps the generic
+// match and contains its captured value, making the generic redundant.
+func shadowedBySpecific(generic *types.Match, specific []*types.Match) bool {
+	for _, s := range specific {
+		if spansOverlap(generic, s) && groupValueContains(s, generic) {
+			return true
+		}
+	}
+	return false
 }
 
 // clusterBySharedValues groups matches whose captured group values overlap.
@@ -96,32 +138,6 @@ func (d *CrossRuleDeduplicator) clusterBySharedValues(matches []*types.Match) []
 				union(i, prev)
 			} else {
 				valueIndex[val] = i
-			}
-		}
-	}
-
-	// A generic rule often captures only a substring of a secret that a
-	// provider-specific rule matched in full (for example an Anthropic key
-	// captured as a truncated generic API key). Exact value sharing misses
-	// these, so also merge a generic match with a specific match when their
-	// byte spans overlap and one's captured value is contained in the other's.
-	// Requiring overlapping spans keeps unrelated findings at disjoint offsets
-	// separate, and iterating only generic/specific pairs both bounds the work
-	// and leaves specific/specific clustering unchanged. pickWinner then drops
-	// the generic in favour of the specific.
-	var generic, specific []int
-	for i, m := range matches {
-		if d.isGeneric(m) {
-			generic = append(generic, i)
-		} else {
-			specific = append(specific, i)
-		}
-	}
-	for _, gi := range generic {
-		for _, si := range specific {
-			if spansOverlap(matches[gi], matches[si]) &&
-				containsGroupValue(matches[gi], matches[si]) {
-				union(gi, si)
 			}
 		}
 	}
@@ -217,20 +233,20 @@ func spansOverlap(a, b *types.Match) bool {
 		b.Location.Offset.Start < a.Location.Offset.End
 }
 
-// containsGroupValue reports whether any non-empty captured group value of one
-// match is a substring of a captured group value of the other.
-func containsGroupValue(a, b *types.Match) bool {
-	for _, ga := range a.Groups {
-		va := string(ga)
-		if va == "" {
+// groupValueContains reports whether some non-empty captured value of inner is
+// a substring of a captured value of outer.
+func groupValueContains(outer, inner *types.Match) bool {
+	for _, gi := range inner.Groups {
+		vi := string(gi)
+		if vi == "" {
 			continue
 		}
-		for _, gb := range b.Groups {
-			vb := string(gb)
-			if vb == "" {
+		for _, go_ := range outer.Groups {
+			vo := string(go_)
+			if vo == "" {
 				continue
 			}
-			if strings.Contains(va, vb) || strings.Contains(vb, va) {
+			if strings.Contains(vo, vi) {
 				return true
 			}
 		}

@@ -485,6 +485,34 @@ func TestCrossRule_GenericDisjointOffsetNotMerged(t *testing.T) {
 	require.Len(t, result, 2)
 }
 
+func TestCrossRule_BroadGenericDoesNotDropSpecifics(t *testing.T) {
+	// A single broad generic match overlaps two distinct provider-specific
+	// matches and its captured value is a substring of both. Dropping the
+	// generic must keep both specific findings rather than merging them.
+	rules := map[string]*types.Rule{
+		"np.anthropic.1": {ID: "np.anthropic.1", Pattern: `sk-ant-[A-Za-z0-9_-]+`},
+		"np.generic.2": {
+			ID:         "np.generic.2",
+			Pattern:    `[A-Za-z0-9_-]+`,
+			Categories: []string{"generic"},
+		},
+	}
+	dedup := NewCrossRuleDeduplicator(rules, nil)
+
+	matches := []*types.Match{
+		matchAt("np.anthropic.1", 0, 16, "sk-ant-api03-aaa"),
+		matchAt("np.anthropic.1", 50, 66, "sk-ant-api03-bbb"),
+		matchAt("np.generic.2", 0, 66, "api03"),
+	}
+
+	result := dedup.Deduplicate(matches)
+
+	require.Len(t, result, 2)
+	for _, m := range result {
+		assert.Equal(t, "np.anthropic.1", m.RuleID)
+	}
+}
+
 func TestCrossRule_SpecificSubstringNotMerged(t *testing.T) {
 	// Two provider-specific matches where one value is a substring of the other
 	// must not be merged by the substring rule; it only applies to a generic
