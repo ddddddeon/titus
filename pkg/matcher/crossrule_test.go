@@ -513,6 +513,31 @@ func TestCrossRule_BroadGenericDoesNotDropSpecifics(t *testing.T) {
 	}
 }
 
+func TestCrossRule_GenericContextSubstringKeepsBothFindings(t *testing.T) {
+	// A broad username/password generic overlaps an Anthropic key, and its
+	// username capture ("ant") is a substring of the key. Its declared secret
+	// is the password, which is not a substring of the key, so the generic
+	// (its own distinct finding) must be kept.
+	rules := map[string]*types.Rule{
+		"np.anthropic.1": {ID: "np.anthropic.1", Pattern: `sk-ant-[A-Za-z0-9_-]+`},
+		"np.generic.3": {
+			ID:         "np.generic.3",
+			Pattern:    `user=...;pass=...`,
+			Categories: []string{"generic"},
+		},
+	}
+	dedup := NewCrossRuleDeduplicator(rules, nil)
+
+	matches := []*types.Match{
+		matchAt("np.anthropic.1", 20, 44, "sk-ant-api03-key-asdf-AA"),
+		matchAt("np.generic.3", 0, 60, "ant", "unrelated-password"),
+	}
+
+	result := dedup.Deduplicate(matches)
+
+	require.Len(t, result, 2)
+}
+
 func TestCrossRule_SpecificSubstringNotMerged(t *testing.T) {
 	// Two provider-specific matches where one value is a substring of the other
 	// must not be merged by the substring rule; it only applies to a generic

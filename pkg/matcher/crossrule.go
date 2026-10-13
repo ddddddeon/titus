@@ -1,8 +1,8 @@
 package matcher
 
 import (
+	"bytes"
 	"sort"
-	"strings"
 
 	"github.com/praetorian-inc/titus/pkg/types"
 )
@@ -61,13 +61,17 @@ func (d *CrossRuleDeduplicator) Deduplicate(matches []*types.Match) []*types.Mat
 }
 
 // dropRedundantGenerics removes a generic match when a provider-specific match
-// overlaps it and fully contains its captured value. A generic catch-all rule
+// overlaps it and contains its secret value. A generic catch-all rule
 // frequently captures only a substring of a secret that a specific rule already
 // reports in full (for example an Anthropic key seen as a truncated generic API
 // key). Exact-value clustering does not catch this because the captured values
 // differ. Filtering the generic out, rather than clustering it, means two
-// independent provider-specific findings are never merged or discarded, even
-// when a single short generic value is a substring of both.
+// independent provider-specific findings are never merged or discarded.
+//
+// The comparison uses each match's declared secret capture (SecretGroup), not
+// any captured group, so a broad generic that also captures unrelated context
+// (for example a username/password rule whose username happens to be a
+// substring of a nearby key) keeps its own finding.
 func (d *CrossRuleDeduplicator) dropRedundantGenerics(matches []*types.Match) []*types.Match {
 	specific := make([]*types.Match, 0, len(matches))
 	for _, m := range matches {
@@ -79,9 +83,15 @@ func (d *CrossRuleDeduplicator) dropRedundantGenerics(matches []*types.Match) []
 		return matches
 	}
 
+	// Sorted by start offset so shadowedBySpecific can stop scanning once a
+	// specific begins at or after the generic's end.
+	sort.Slice(specific, func(i, j int) bool {
+		return specific[i].Location.Offset.Start < specific[j].Location.Offset.Start
+	})
+
 	kept := make([]*types.Match, 0, len(matches))
 	for _, m := range matches {
-		if d.isGeneric(m) && shadowedBySpecific(m, specific) {
+		if d.isGeneric(m) && d.shadowedBySpecific(m, specific) {
 			continue
 		}
 		kept = append(kept, m)
@@ -90,14 +100,33 @@ func (d *CrossRuleDeduplicator) dropRedundantGenerics(matches []*types.Match) []
 }
 
 // shadowedBySpecific reports whether a specific match overlaps the generic
-// match and contains its captured value, making the generic redundant.
-func shadowedBySpecific(generic *types.Match, specific []*types.Match) bool {
+// match and contains its secret value, making the generic redundant. specific
+// must be sorted by start offset.
+func (d *CrossRuleDeduplicator) shadowedBySpecific(generic *types.Match, specific []*types.Match) bool {
+	genericSecret := d.secretValue(generic)
+	if len(genericSecret) == 0 {
+		return false
+	}
 	for _, s := range specific {
-		if spansOverlap(generic, s) && groupValueContains(s, generic) {
+		if s.Location.Offset.Start >= generic.Location.Offset.End {
+			break
+		}
+		if spansOverlap(generic, s) &&
+			bytes.Contains(d.secretValue(s), genericSecret) {
 			return true
 		}
 	}
 	return false
+}
+
+// secretValue returns the match's declared secret capture, resolved via the
+// rule's SecretGroup.
+func (d *CrossRuleDeduplicator) secretValue(m *types.Match) []byte {
+	secretGroup := ""
+	if r, ok := d.rules[m.RuleID]; ok {
+		secretGroup = r.SecretGroup
+	}
+	return SecretCapture(m, secretGroup)
 }
 
 // clusterBySharedValues groups matches whose captured group values overlap.
@@ -231,27 +260,6 @@ func (d *CrossRuleDeduplicator) isGeneric(m *types.Match) bool {
 func spansOverlap(a, b *types.Match) bool {
 	return a.Location.Offset.Start < b.Location.Offset.End &&
 		b.Location.Offset.Start < a.Location.Offset.End
-}
-
-// groupValueContains reports whether some non-empty captured value of inner is
-// a substring of a captured value of outer.
-func groupValueContains(outer, inner *types.Match) bool {
-	for _, gi := range inner.Groups {
-		vi := string(gi)
-		if vi == "" {
-			continue
-		}
-		for _, go_ := range outer.Groups {
-			vo := string(go_)
-			if vo == "" {
-				continue
-			}
-			if strings.Contains(vo, vi) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // ruleHasCategory reports whether the rule is tagged with the given category.
