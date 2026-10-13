@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/praetorian-inc/titus/pkg/types"
 )
@@ -99,6 +100,24 @@ func (d *CrossRuleDeduplicator) clusterBySharedValues(matches []*types.Match) []
 		}
 	}
 
+	// A generic rule often captures only a substring of a secret that a
+	// provider-specific rule matched in full (for example an Anthropic key
+	// captured as a truncated generic API key). Exact value sharing misses
+	// these, so also merge a generic match with a specific match when one's
+	// captured value is contained in the other's. pickWinner then drops the
+	// generic in favour of the specific. Restricting this to generic/specific
+	// pairs leaves specific/specific clustering unchanged.
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			if d.isGeneric(matches[i]) == d.isGeneric(matches[j]) {
+				continue
+			}
+			if containsGroupValue(matches[i], matches[j]) {
+				union(i, j)
+			}
+		}
+	}
+
 	// Collect clusters by root
 	clusterMap := make(map[int][]*types.Match)
 	for i, m := range matches {
@@ -174,6 +193,35 @@ func (d *CrossRuleDeduplicator) score(m *types.Match) matchScore {
 		patternLen:   patternLen,
 		ruleID:       m.RuleID,
 	}
+}
+
+// isGeneric reports whether the match's rule carries the "generic" category.
+func (d *CrossRuleDeduplicator) isGeneric(m *types.Match) bool {
+	if r, ok := d.rules[m.RuleID]; ok {
+		return ruleHasCategory(r, "generic")
+	}
+	return false
+}
+
+// containsGroupValue reports whether any non-empty captured group value of one
+// match is a substring of a captured group value of the other.
+func containsGroupValue(a, b *types.Match) bool {
+	for _, ga := range a.Groups {
+		va := string(ga)
+		if va == "" {
+			continue
+		}
+		for _, gb := range b.Groups {
+			vb := string(gb)
+			if vb == "" {
+				continue
+			}
+			if strings.Contains(va, vb) || strings.Contains(vb, va) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ruleHasCategory reports whether the rule is tagged with the given category.
